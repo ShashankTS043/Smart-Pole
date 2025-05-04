@@ -1,0 +1,190 @@
+#include <DHT.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <SPI.h>
+#include <LoRa.h>
+
+// --- Pin Definitions ---
+#define DHTPIN 2
+#define DHTTYPE DHT22
+#define MQ135_PIN A0
+#define NOISE_PIN A1
+#define BUTTON_PIN 5
+
+// --- LoRa Pins ---
+#define LORA_SS 10
+#define LORA_RST 9
+#define LORA_DIO0 8
+
+// --- Globals ---
+DHT dht(DHTPIN, DHTTYPE);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+bool loraMode = false;
+bool receiving = true;
+unsigned long lastSwitch = 0;
+int displayState = 0;
+int receivedCount = 0;
+
+// --- Noise Sampling ---
+unsigned long lastNoiseSample = 0;
+const int noiseSampleInterval = 100;  // Sample every 100ms
+float noiseAverage = 0;
+const float alpha = 0.05;  // smoothing factor for EMA
+
+void setup() {
+  Serial.begin(9600);
+  dht.begin();
+  lcd.init();
+  lcd.backlight();
+
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
+
+  setupLoRa();
+}
+
+void setupLoRa() {
+  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+  if (!LoRa.begin(433E6)) {
+    Serial.println("LoRa init failed.");
+    lcd.clear();
+    lcd.print("LoRa Init Fail");
+    while (1);
+  }
+  Serial.println("LoRa init OK");
+  lcd.clear();
+  lcd.print("LoRa Ready");
+  delay(1000);
+}
+
+void loop() {
+  // --- Handle button press ---
+  if (digitalRead(BUTTON_PIN) == LOW && !loraMode) {
+    loraMode = true;
+    lcd.clear();
+    lcd.print("LoRa Receiving");
+    receivedCount = 0;
+    receiving = true;
+    delay(300); // debounce
+  }
+
+  // --- LoRa Case ---
+  if (loraMode) {
+    if (receiving) {
+      receiveCoordinates();
+      if (receivedCount >= 20) {
+        receiving = false;
+        lcd.clear();
+        lcd.print("Sending Msg...");
+        delay(1000);
+        sendConfirmation();
+        lcd.clear();
+        lcd.print("Sent Confirm");
+        delay(2000);
+        loraMode = false; // back to normal
+        lcd.clear();
+      }
+    }
+    return;
+  }
+
+  // --- Frequent Noise Sampling ---
+  unsigned long now = millis();
+  if (now - lastNoiseSample >= noiseSampleInterval) {
+    lastNoiseSample = now;
+    int noiseRaw = analogRead(NOISE_PIN);
+    float dB = map(noiseRaw, 0, 1023, 30, 130);
+    noiseAverage = (alpha * dB) + ((1 - alpha) * noiseAverage);
+  }
+
+  // --- Cycle LCD display every 5 sec ---
+  if (now - lastSwitch >= 5000) {
+    displayState = (displayState + 1) % 3;
+    lastSwitch = now;
+  }
+
+  lcd.clear();
+  switch (displayState) {
+    case 0:
+      displayTempHumidity();
+      break;
+    case 1:
+      displayAirQuality();
+      break;
+    case 2:
+      displayNoiseLevel();
+      break;
+  }
+
+  delay(1000);
+}
+
+// --- Sensor Display Functions ---
+void displayTempHumidity() {
+  float temp = dht.readTemperature();
+  float hum = dht.readHumidity();
+
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: ");
+  lcd.print(temp, 1);
+  lcd.print("C");
+  lcd.setCursor(0, 1);
+  lcd.print("Hum: ");
+  lcd.print(hum, 1);
+  lcd.print("%");
+}
+
+void displayAirQuality() {
+  int airRaw = analogRead(MQ135_PIN);
+  lcd.setCursor(0, 0);
+  lcd.print("Air: ");
+  lcd.print(airRaw);
+
+  lcd.setCursor(0, 1);
+  if (airRaw < 300)
+    lcd.print("Good");
+  else
+    lcd.print("Poor");
+}
+
+void displayNoiseLevel() {
+  lcd.setCursor(0, 0);
+  lcd.print("Noise: ");
+  lcd.print((int)noiseAverage);
+  lcd.print(" dB");
+
+  lcd.setCursor(0, 1);
+  if (noiseAverage > 70)
+    lcd.print("Loud");
+  else
+    lcd.print("Quiet");
+}
+
+// --- LoRa Receive/Send ---
+void receiveCoordinates() {
+  int packetSize = LoRa.parsePacket();
+  if (packetSize) {
+    String incoming = "";
+    while (LoRa.available()) {
+      incoming += (char)LoRa.read();
+    }
+    receivedCount++;
+    Serial.print("Received #");
+    Serial.print(receivedCount);
+    Serial.print(": ");
+    Serial.println(incoming);
+    lcd.clear();
+    lcd.print("Recv ");
+    lcd.print(receivedCount);
+    lcd.setCursor(0, 1);
+    lcd.print(incoming.substring(0, 16)); // Show first 16 chars
+    delay(1000);
+  }
+}
+
+void sendConfirmation() {
+  LoRa.beginPacket();
+  LoRa.print("Coordinates received");
+  LoRa.endPacket();
+  Serial.println("Sent: Coordinates received");
+}
