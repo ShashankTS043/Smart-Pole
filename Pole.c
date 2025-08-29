@@ -6,7 +6,7 @@
 #include <ArduinoJson.h>
 
 // --- Pin Definitions ---
-#define DHTPIN 2
+#define DHTPIN A2
 #define DHTTYPE DHT22
 #define MQ135_PIN A0
 #define NOISE_PIN A1
@@ -114,13 +114,21 @@ void receiveCoordinates() {
     while (LoRa.available()) {
       packet += (char)LoRa.read();
     }
-
     Serial.print("LoRa received: ");
     Serial.println(packet);
+
+    // Handle "GPS data not available" messages
+    if (packet.startsWith("GPS data not available")) {
+      Serial.println("GPS data not available message received");
+      Serial.println("GPS:{\"status\":\"no_data\"}");
+      latestCoordinates = packet;
+      return;
+    }
 
     int sepIndex = packet.indexOf('|');
     if (sepIndex == -1) {
       Serial.println("Invalid packet format");
+      latestCoordinates = packet; // display raw message anyway
       return;
     }
 
@@ -134,7 +142,6 @@ void receiveCoordinates() {
       lastSequenceNumber = seqNum;
       latestCoordinates = packet;
 
-      // Send GPS clog data as JSON to ESP32-CAM prefixed with "GPS:"
       Serial.print("GPS:");
       Serial.println(createGpsJson(latestCoordinates));
     }
@@ -142,10 +149,15 @@ void receiveCoordinates() {
 }
 
 String createGpsJson(String packet) {
-  // packet format: SEQ|TIMESTAMP|LATITUDE|LONGITUDE
+  // Packet format: SEQ|TIMESTAMP|LATITUDE|LONGITUDE
   int first = packet.indexOf('|');
   int second = packet.indexOf('|', first + 1);
   int third = packet.indexOf('|', second + 1);
+
+  if (first == -1 || second == -1 || third == -1) {
+    return "{}"; // Invalid format
+  }
+
   String latitude = packet.substring(second + 1, third);
   String longitude = packet.substring(third + 1);
 
@@ -175,14 +187,11 @@ void sendEnvironmentalData() {
   String envJson;
   serializeJson(envDoc, envJson);
 
-  // Send environmental JSON prefixed with "ENV:"
   Serial.print("ENV:");
   Serial.println(envJson);
-
   Serial.println("Environmental data sent.");
 }
 
-// Sensor read helpers
 float readCalibratedAirQuality() {
   int raw = analogRead(MQ135_PIN);
   float adjusted = raw - mq135Baseline;
@@ -195,7 +204,6 @@ void updateNoise() {
   noiseAverage = alphaNoise * dB + (1 - alphaNoise) * noiseAverage;
 }
 
-// LCD Display functions
 void displayTempHumidity() {
   lcd.setCursor(0, 0);
   lcd.print("Temp: ");
@@ -227,11 +235,15 @@ void displayNoiseLevel() {
 void displayCoordinates() {
   lcd.setCursor(0, 0);
   if (latestCoordinates.length() > 0) {
-    lcd.print("Coords:");
+    lcd.print("Msg:");
     lcd.setCursor(0, 1);
-    lcd.print(latestCoordinates.substring(0, 16));
+    if (latestCoordinates.length() > 16) {
+      lcd.print(latestCoordinates.substring(0, 16));
+    } else {
+      lcd.print(latestCoordinates);
+    }
   } else {
-    lcd.print("No Coords");
+    lcd.print("No LoRa Msg");
   }
 }
 
@@ -246,3 +258,4 @@ void displaySummary() {
   lcd.print((int)noiseAverage);
   lcd.print("dB");
 }
+
