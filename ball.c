@@ -1,92 +1,132 @@
-#include <SoftwareSerial.h>
 #include <TinyGPSPlus.h>
-#include <Wire.h>
-#include <MPU6050.h>
+#include <SoftwareSerial.h>
 #include <SPI.h>
 #include <LoRa.h>
+#include <Wire.h>
+#include <MPU6050.h>
 
-// GPS pins for Nano
-SoftwareSerial gpsSerial(5, 6); // RX, TX
+// GPS module on D4 (RX), D3 (TX)
+static const int RXPin = 4, TXPin = 3;
+static const uint32_t GPSBaud = 9600;
+
 TinyGPSPlus gps;
+SoftwareSerial gpsSerial(RXPin, TXPin);
 
-// MPU6050 instance
+// LoRa SX1278 module connections
+#define LORA_CS   10
+#define LORA_RST  9
+#define LORA_IRQ  2
+
 MPU6050 mpu;
 
-// LoRa pins
-#define LORA_SS 10
-#define LORA_RST 9
-#define LORA_DIO0 8
+const float ACC_THRESHOLD = 0.1;  // Threshold for motion detection
 
-uint16_t seqNumber = 0;
-unsigned long stationaryStart = 0;
-const unsigned long stationaryThreshold = 5000; // 5 seconds
-bool isStationary = false;
-const float accelThreshold = 0.05; // sensitivity to gravity
-bool sentStopAlert = false;
+int serialNumber = 0;
 
 void setup() {
   Serial.begin(9600);
-  gpsSerial.begin(9600);
+  gpsSerial.begin(GPSBaud);
 
+  Serial.println("Initializing MPU6050...");
   Wire.begin();
   mpu.initialize();
   if (!mpu.testConnection()) {
     Serial.println("MPU6050 connection failed");
     while (1);
   }
+  Serial.println("MPU6050 connected.");
 
-  LoRa.setPins(LORA_SS, LORA_RST, LORA_DIO0);
+  Serial.println("Initializing LoRa...");
+  LoRa.setPins(LORA_CS, LORA_RST, LORA_IRQ);
   if (!LoRa.begin(433E6)) {
-    Serial.println("LoRa init failed");
+    Serial.println("LoRa init failed.");
     while (1);
   }
-  LoRa.setTxPower(20);
+  Serial.println("LoRa initialized.");
 
-  Serial.println("Setup complete");
+  Serial.println("Setup complete.");
 }
 
 void loop() {
+  // Feed GPS
   while (gpsSerial.available() > 0) {
     gps.encode(gpsSerial.read());
   }
 
-  int16_t ax, ay, az;
-  mpu.getAcceleration(&ax, &ay, &az);
-  
-  float xg = ax / 16384.0;
-  float yg = ay / 16384.0;
-  float zg = az / 16384.0;
+  // Read MPU6050 accel data
+  int16_t ax_raw, ay_raw, az_raw;
+  mpu.getAcceleration(&ax_raw, &ay_raw, &az_raw);
 
-  float totalAccel = sqrt(xg * xg + yg * yg + zg * zg);
+  float ax = ax_raw / 16384.0;
+  float ay = ay_raw / 16384.0;
+  float az = az_raw / 16384.0;
 
-  if (abs(totalAccel - 1.0) < accelThreshold) {
-    if (!isStationary) {
-      stationaryStart = millis();
-      isStationary = true;
-    } else if (!sentStopAlert && (millis() - stationaryStart > stationaryThreshold)) {
-      sendClogAlert();
-      sentStopAlert = true;
+  float magnitude = sqrt(ax*ax + ay*ay + az*az);
+  bool isMoving = (magnitude > (1.0 + ACC_THRESHOLD)) || (magnitude < (1.0 - ACC_THRESHOLD));
+
+  // Print MPU6050 data
+  Serial.println("----- MPU6050 Data -----");
+  Serial.print("Accel X: "); Serial.print(ax, 3);
+  Serial.print(" g\tY: "); Serial.print(ay, 3);
+  Serial.print(" g\tZ: "); Serial.print(az, 3);
+  Serial.print(" g\tMagnitude: "); Serial.print(magnitude, 3);
+  Serial.print(" g\tMotion: ");
+  Serial.println(isMoving ? "MOVING" : "STATIONARY");
+  Serial.println("-----------------------");
+
+  // Print GPS data
+  if (gps.location.isValid()) {
+    Serial.println("----- GPS Data -----");
+    Serial.print("Latitude: "); Serial.println(gps.location.lat(), 6);
+    Serial.print("Longitude: "); Serial.println(gps.location.lng(), 6);
+    Serial.print("Speed (km/h): "); Serial.println(gps.speed.kmph());
+    Serial.print("UTC Time: ");
+    Serial.print(gps.time.hour()); Serial.print(":");
+    Serial.print(gps.time.minute()); Serial.print(":");
+    Serial.println(gps.time.second());
+    Serial.println("--------------------");
+  } else {
+    Serial.println("[GPS] Waiting for GPS fix...");
+  }
+
+  // Send LoRa message depending on movement and GPS lock
+  if (!isMoving) {
+    if (gps.location.isValid()) {
+      String data = "LoRa 1 | SN: " + String(serialNumber);
+      data += " | Lat: " + String(gps.location.lat(), 6);
+      data += " | Lon: " + String(gps.location.lng(), 6);
+      data += " | Spd: " + String(gps.speed.kmph(), 2);
+      data += " | UTC: ";
+      data += gps.time.hour(); data += ":";
+      data += gps.time.minute(); data += ":";
+      data += gps.time.second();
+
+      LoRa.beginPacket();
+      LoRa.print(data);
+      LoRa.endPacket();
+
+      Serial.println("[LoRa] Sent data:");
+      Serial.println(data);
+    } else {
+      String noFixMsg = "LoRa 1 | SN: " + String(serialNumber) + " | No GPS fix yet";
+      LoRa.beginPacket();
+      LoRa.print(noFixMsg);
+      LoRa.endPacket();
+
+      Serial.println("[LoRa] Sent no-fix message:");
+      Serial.println(noFixMsg);
     }
   } else {
-    isStationary = false;
-    sentStopAlert = false;
-  }
-}
-
-void sendClogAlert() {
-  if (gps.location.isValid()) {
-    String packet = String(seqNumber) + "|";
-    packet += String(millis()) + "|";
-    packet += String(gps.location.lat(), 6) + "|";
-    packet += String(gps.location.lng(), 6);
-
+    String movingMsg = "LoRa 1 | SN: " + String(serialNumber) + " | Ball is moving";
     LoRa.beginPacket();
-    LoRa.print(packet);
+    LoRa.print(movingMsg);
     LoRa.endPacket();
 
-    Serial.println("LoRa sent: " + packet);
-    seqNumber++;
-  } else {
-    Serial.println("GPS location invalid, cannot send alert");
+    Serial.println("[LoRa] Sent moving message:");
+    Serial.println(movingMsg);
   }
+
+  serialNumber++;
+
+  delay(3000);
 }
