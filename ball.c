@@ -108,7 +108,7 @@ void loop() {
       Serial.println("[LoRa] Sent data:");
       Serial.println(data);
     } else {
-      String noFixMsg = "LoRa 1 | SN: " + String(serialNumber) + " | No GPS fix yet";
+      String noFixMsg = "GPS Not Available";
       LoRa.beginPacket();
       LoRa.print(noFixMsg);
       LoRa.endPacket();
